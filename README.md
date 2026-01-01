@@ -62,7 +62,14 @@ Este proyecto es una herramienta robusta en C# diseñada para traders e inversor
 
 ---
 
-## 📜 Licencia
+## �‍💻 Contacto y Autor
+Desarrollado por **Adrian Mayora**.  
+Puedes ver más de mi trabajo en mi portafolio personal:  
+🔗 [adrian-mayora-curriculum.netlify.app](https://adrian-mayora-curriculum.netlify.app/)
+
+---
+
+## �📜 Licencia
 Este proyecto es de uso personal y educativo. Las decisiones financieras tomadas basadas en este software son responsabilidad del usuario.
 
-**Desarrollado con 🦾 por Advanced Agentic Coding.**
+
