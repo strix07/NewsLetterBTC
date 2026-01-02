@@ -5,6 +5,9 @@ using System.Net.Http;
 using System.Threading.Tasks;
 using System.Text.Json;
 using System.Globalization;
+using System.IO;
+using System.Text;
+using TextCopy;
 
 namespace CryptoNewsletter
 {
@@ -21,17 +24,26 @@ namespace CryptoNewsletter
         public decimal TakerBuyVolume { get; set; } // Para CVD
     }
 
+    public class BlockchainChart { public List<ChartValue> values { get; set; } }
+    public class ChartValue { public long x { get; set; } public double y { get; set; } }
+
     class Program
     {
         private static readonly HttpClient client = new HttpClient();
+        private static readonly StringWriter outputCapture = new StringWriter();
+        private static readonly TextWriter originalOut = Console.Out;
 
         static async Task Main(string[] args)
         {
             client.DefaultRequestHeaders.Add("User-Agent", "CryptoAnalyst/1.0");
 
+            // Redirect console output to capture text
+            var multiWriter = new MultiTextWriter(originalOut, outputCapture);
+            Console.SetOut(multiWriter);
+
             Console.Clear();
             Console.WriteLine("==================================================");
-            Console.WriteLine("     CRYPTO & MACRO INTELLIGENCE v9.8 (Precision)");
+            Console.WriteLine("     CRYPTO & MACRO INTELLIGENCE v9.9 (Precision)");
             Console.WriteLine("==================================================");
             Console.WriteLine($"Fecha: {DateTime.Now:g}");
             Console.WriteLine("Obteniendo velas históricas de Binance...\n");
@@ -58,10 +70,18 @@ namespace CryptoNewsletter
                 Console.WriteLine("--- CONTEXTO MACROECONÓMICO ---");
                 Console.ResetColor();
                 
+                Console.WriteLine("\n1. Dólar y Liquidez");
                 await FetchMacroIndicator("DX-Y.NYB", "Índice Dólar (DXY)", "");
-                await FetchMacroIndicator("TIP", "Exp. Inflación (TIP)", "");
                 await FetchStablecoinMCAP();
+                await FetchUSDTPremium();
+
+
+
+                Console.WriteLine("\n2. Inflación y Expectativas");
+                await FetchMacroIndicator("TIP", "Exp. Inflación (TIP)", "");
                 await FetchRealRate();
+
+                Console.WriteLine("\n3. Bonos y Tasas");
                 await FetchMacroIndicator("^TNX", "Bonos USA 10Y (Yield)", "%");
                 await FetchMacroIndicator("^IRX", "Tasas FED (3M Proxy)", "%");
             }
@@ -73,6 +93,23 @@ namespace CryptoNewsletter
             }
 
             Console.WriteLine("\n==================================================");
+            
+            // Copy to clipboard
+            try
+            {
+                string reportText = outputCapture.ToString();
+                ClipboardService.SetText(reportText);
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine("✓ Reporte copiado al portapapeles");
+                Console.ResetColor();
+            }
+            catch
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("⚠ No se pudo copiar al portapapeles");
+                Console.ResetColor();
+            }
+
             Console.WriteLine("Presiona cualquier letra para salir...");
             Console.ReadKey();
         }
@@ -127,10 +164,14 @@ namespace CryptoNewsletter
                 decimal std365 = CalculateStdDev(closes, 365);
                 decimal mvrvZ = (std365 > 0) ? (currentPrice - sma365) / std365 : 0;
 
-                // 8. ADX (Trend Strength)
-                decimal adx = CalculateADX(candles, 14);
+                // 8. ADX (Trend Strength) - Period 14 and 28
+                decimal adx14 = CalculateADX(candles, 14);
+                decimal adx28 = CalculateADX(candles, 28);
 
-                // 9. Z-Score (Estadística 200d)
+                // 9. Hurst Exponent (Market Type)
+                decimal hurst = CalculateHurstExponent(candles, 200);
+
+                // 10. Z-Score (Estadística 200d)
                 decimal zScore = 0;
                 if (closes.Count >= 200)
                 {
@@ -139,463 +180,379 @@ namespace CryptoNewsletter
                     if (std200z > 0) zScore = (currentPrice - sma200z) / std200z;
                 }
 
-                // 10. VWAP (Proxy)
-                decimal vwapDaily = currentCandle.Volume > 0 ? currentCandle.QuoteAssetVolume / currentCandle.Volume : 0;
-            
-                // --- IMPRIMIR RESULTADOS ---
+                // 11. Z-Score Retorno 30D
+                decimal returnZ30d = CalculateReturnZScore(closes, 30);
 
+                // 12. VWAP (Proxy)
+                decimal vwapDaily = currentCandle.Volume > 0 ? currentCandle.QuoteAssetVolume / currentCandle.Volume : 0;
+
+                // 13. Volume Z-Score (Institutional)
+                var volumes = candles.Select(c => c.Volume).ToList();
+                decimal volumeZScore = 0;
+                if (candles.Count >= 200)
+                {
+                    decimal smaVol200 = CalculateSMA(volumes, 200);
+                    decimal stdVol200 = CalculateStdDev(volumes, 200);
+                    if (stdVol200 > 0)
+                    {
+                        volumeZScore = (currentCandle.Volume - smaVol200) / stdVol200;
+                    }
+                }
+            
+                // 14. Bitcoin Mining Cost & Miners Stress (Solo BTC)
+                decimal miningCost30d = 0; decimal miningCost90d = 0; decimal miningRatio = 0; decimal minersStress = 0;
+                if (symbol == "BTCUSDT")
+                {
+                    var costHistory = await FetchMiningCostHistory();
+                    if (costHistory.Count >= 90)
+                    {
+                        miningCost30d = costHistory.Skip(costHistory.Count - 30).Average();
+                        miningCost90d = costHistory.Skip(costHistory.Count - 90).Average();
+                        miningRatio = (miningCost30d > 0) ? currentPrice / miningCost30d : 0;
+                        minersStress = (currentPrice > 0) ? miningCost30d / currentPrice : 0;
+                    }
+                }
+
+                // --- IMPRIMIR RESULTADOS (FORMATO INSTITUCIONAL) ---
+
+                // 1. Precio y Contexto General
+                Console.WriteLine("1. Precio y Contexto General");
                 Console.Write($"Precio Actual:   ${currentPrice:N2} ");
                 
-                // 7d, 30d & 90d Changes
                 if (candles.Count >= 91)
                 {
                     decimal close7d = candles[candles.Count - 8].Close;
                     decimal close30d = candles[candles.Count - 31].Close;
                     decimal close90d = candles[candles.Count - 91].Close;
-                    
                     decimal change7d = (currentPrice - close7d) / close7d;
                     decimal change30d = (currentPrice - close30d) / close30d;
                     decimal change90d = (currentPrice - close90d) / close90d;
-
                     Console.Write("(");
-                    
                     Console.Write("7d: ");
-                    if (change7d >= 0) Console.ForegroundColor = ConsoleColor.Green;
-                    else Console.ForegroundColor = ConsoleColor.Red;
-                    Console.Write($"{change7d:+0.00%;-0.00%}");
-                    Console.ResetColor();
-
+                    if (change7d >= 0) Console.ForegroundColor = ConsoleColor.Green; else Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Write($"{change7d:+0.00%;-0.00%}"); Console.ResetColor();
                     Console.Write(" | 30d: ");
-                    if (change30d >= 0) Console.ForegroundColor = ConsoleColor.Green;
-                    else Console.ForegroundColor = ConsoleColor.Red;
-                    Console.Write($"{change30d:+0.00%;-0.00%}");
-                    Console.ResetColor();
-
+                    if (change30d >= 0) Console.ForegroundColor = ConsoleColor.Green; else Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Write($"{change30d:+0.00%;-0.00%}"); Console.ResetColor();
                     Console.Write(" | 90d: ");
-                    if (change90d >= 0) Console.ForegroundColor = ConsoleColor.Green;
-                    else Console.ForegroundColor = ConsoleColor.Red;
-                    Console.Write($"{change90d:+0.00%;-0.00%}");
-                    Console.ResetColor();
-
+                    if (change90d >= 0) Console.ForegroundColor = ConsoleColor.Green; else Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Write($"{change90d:+0.00%;-0.00%}"); Console.ResetColor();
                     Console.WriteLine(")");
                 }
                 else if (candles.Count >= 31)
                 {
                     decimal close7d = candles[candles.Count - 8].Close;
                     decimal close30d = candles[candles.Count - 31].Close;
-                    
                     decimal change7d = (currentPrice - close7d) / close7d;
                     decimal change30d = (currentPrice - close30d) / close30d;
-
                     Console.Write("(");
-                    
                     Console.Write("7d: ");
-                    if (change7d >= 0) Console.ForegroundColor = ConsoleColor.Green;
-                    else Console.ForegroundColor = ConsoleColor.Red;
-                    Console.Write($"{change7d:+0.00%;-0.00%}");
-                    Console.ResetColor();
-
+                    if (change7d >= 0) Console.ForegroundColor = ConsoleColor.Green; else Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Write($"{change7d:+0.00%;-0.00%}"); Console.ResetColor();
                     Console.Write(" | 30d: ");
-                    if (change30d >= 0) Console.ForegroundColor = ConsoleColor.Green;
-                    else Console.ForegroundColor = ConsoleColor.Red;
-                    Console.Write($"{change30d:+0.00%;-0.00%}");
-                    Console.ResetColor();
-
+                    if (change30d >= 0) Console.ForegroundColor = ConsoleColor.Green; else Console.ForegroundColor = ConsoleColor.Red;
+                    Console.Write($"{change30d:+0.00%;-0.00%}"); Console.ResetColor();
                     Console.WriteLine(")");
                 }
-                else
-                {
-                    Console.WriteLine();
-                }
-                
-                // --- PRICE ACTION & ATH ---
+                else Console.WriteLine();
+
                 decimal athPrice = 0;
-                try 
-                {
-                    if (isCrypto)
-                    {
+                try {
+                    if (isCrypto) {
                         var monthlyCandles = await FetchBinanceKlines(symbol, "1M", 120);
                         athPrice = monthlyCandles.Max(c => c.High);
-                    }
-                    else
-                    {
-                        athPrice = candles.Max(c => c.High);
-                    }
-                }
-                catch { /* fallback */ }
+                    } else { athPrice = candles.Max(c => c.High); }
+                } catch { }
 
                 if (athPrice > 0)
                 {
                     decimal dropFromAth = ((athPrice - currentPrice) / athPrice) * 100;
                     Console.Write("ATH:             ");
                     Console.Write($"{athPrice:N0}  ");
-                    if (currentPrice >= athPrice * 0.99m)
-                    {
-                        Console.ForegroundColor = ConsoleColor.Magenta; // Price Discovery
-                        Console.WriteLine("(EN PRICE DISCOVERY)");
-                    }
-                    else
-                    {
-                        Console.ForegroundColor = ConsoleColor.Red;
-                        Console.WriteLine($"(-{dropFromAth:N2}% desde Máximos)");
+                    if (currentPrice >= athPrice * 0.99m) {
+                        Console.ForegroundColor = ConsoleColor.Magenta; Console.WriteLine("(EN PRICE DISCOVERY)");
+                    } else {
+                        Console.ForegroundColor = ConsoleColor.Red; Console.WriteLine($"(-{dropFromAth:N2}% desde Máximos)");
                     }
                     Console.ResetColor();
                 }
 
+                // 2. Volatilidad y Movimiento Esperado
+                Console.WriteLine("\n2. Volatilidad y Movimiento Esperado");
                 decimal atrPct = (atr / currentPrice) * 100;
                 Console.WriteLine($"Volatilidad ATR: ${atr:N2} ({atrPct:N2}%)");
 
-                // --- RATIO DE VOLUMEN (SMART MONEY) ---
-                var volumes = candles.Select(c => c.Volume).ToList();
+                var atrSeriesFull = CalculateATRSeries(candles, 14);
+                decimal latestAtr = atrSeriesFull.Last();
+                decimal expectedMove7d = latestAtr * (decimal)Math.Sqrt(7);
+                decimal emPct = (expectedMove7d / currentPrice) * 100;
+                var atrHistory = atrSeriesFull.Where(v => v > 0).TakeLast(100).ToList();
+                decimal atrPercentile = CalculatePercentile(latestAtr, atrHistory);
+
+                string emStatus = "NORMAL";
+                ConsoleColor emColor = ConsoleColor.White;
+                if (atrPercentile < 20) { emStatus = "COMPRESIÓN EXTREMA"; emColor = ConsoleColor.Red; }
+                else if (atrPercentile > 60) { emStatus = "EXPANSIÓN PROBABLE"; emColor = ConsoleColor.Green; }
+                else { emStatus = "MOVIMIENTO NORMAL"; emColor = ConsoleColor.DarkYellow; }
+
+                Console.Write($"Expected Move 7D: ±${expectedMove7d:N2} (±{emPct:N2}%) ");
+                Console.ForegroundColor = emColor;
+                Console.WriteLine($"[{emStatus}]");
+                Console.ResetColor();
+
+                // 3. Volumen y Flujo de Órdenes
+                Console.WriteLine("\n3. Volumen y Flujo de Órdenes");
                 decimal smaVol20 = CalculateSMA(volumes, 20);
                 if (smaVol20 > 0)
                 {
                     decimal currentVol = volumes.Last();
                     decimal volRatio = currentVol / smaVol20;
-                    
-                    // Dirección del precio (Cierre actual vs anterior)
                     decimal prevClose = closes.Count >= 2 ? closes[closes.Count - 2] : currentPrice;
                     bool isPriceUp = currentPrice >= prevClose;
 
                     Console.Write("Ratio Volumen:   ");
-                    
                     string volLabel = "NORMAL";
                     ConsoleColor volColor = ConsoleColor.White;
-
-                    // Lógica de Semáforo Institucional
-                    if (isPriceUp)
-                    {
+                    if (isPriceUp) {
                         if (volRatio >= 2.0m) { volLabel = "¡GASOLINA! Instituciones comprando"; volColor = ConsoleColor.Green; }
                         else if (volRatio <= 0.7m) { volLabel = "¡CUIDADO! Subida sin fuerza"; volColor = ConsoleColor.Red; }
                         else if (volRatio >= 1.5m) { volLabel = "VOLUMEN SALUDABLE"; volColor = ConsoleColor.DarkGreen; }
                         else { volLabel = "MOVIMIENTO NORMAL"; volColor = ConsoleColor.DarkYellow; }
+                    } else {
+                        if (volRatio >= 2.0m) { volLabel = "¡PÁNICO/ABSORCIÓN! Ventas institucionales"; volColor = ConsoleColor.Red; }
+                        else if (volRatio <= 0.7m) { volLabel = "AGOTAMIENTO DE VENTAS"; volColor = ConsoleColor.Green; }
+                        else { volLabel = "MOVIMIENTO NORMAL"; volColor = ConsoleColor.DarkYellow; }
                     }
-                    else
-                    {
-                        if (volRatio >= 2.0m) { volLabel = "¡FUEGO! Salida masiva / Riesgo"; volColor = ConsoleColor.Red; }
-                        else if (volRatio <= 0.7m) { volLabel = "¡CALMA! Retroceso técnico"; volColor = ConsoleColor.DarkYellow; }
-                        else if (volRatio >= 1.5m) { volLabel = "VENTA MODERADA"; volColor = ConsoleColor.Red; }
-                        else { volLabel = "RETROCESO NORMAL"; volColor = ConsoleColor.DarkYellow; }
-                    }
-
-                    // Caso especial Spike Extremo (si no se activó por arriba)
-                    if (volRatio >= 3.0m && volColor == ConsoleColor.DarkYellow)
-                    {
-                        volLabel = "SPIKE INSTITUCIONAL (Ballenas)";
-                        volColor = ConsoleColor.Magenta;
-                    }
-
                     Console.ForegroundColor = volColor;
                     Console.WriteLine($"{volRatio:N2}x [{volLabel}]");
                     Console.ResetColor();
-
-                    // --- CVD RATIO & DIVERGENCIA ---
-                    decimal takerBuy = currentCandle.TakerBuyVolume;
-                    decimal totalVol = currentCandle.Volume;
-                    decimal takerSell = totalVol - takerBuy;
-                    decimal cvdDelta = takerBuy - takerSell;
-                    decimal cvdRatio = totalVol > 0 ? (cvdDelta / totalVol) : 0;
-
-                    Console.Write("CVD Ratio Flow:  ");
-                    string cvdLabel = "NEUTRAL";
-                    ConsoleColor cvdColor = ConsoleColor.White;
-
-                    // Divergencias (Prioritarias)
-                    bool bullishDiv = !isPriceUp && cvdRatio > 0;
-                    bool bearishDiv = isPriceUp && cvdRatio < 0;
-
-                    // Definimos umbrales: 3% agresión, 8% extremo (clímax/pánico)
-                    if (bullishDiv) { cvdLabel = "DIVERGENCIA ALCISTA (Absorción)"; cvdColor = ConsoleColor.Green; }
-                    else if (bearishDiv) { cvdLabel = "DIVERGENCIA BAJISTA (Agotamiento)"; cvdColor = ConsoleColor.Red; }
-                    else if (cvdRatio >= 0.08m) { cvdLabel = "COMPRA EXTREMA (Clímax)"; cvdColor = ConsoleColor.Cyan; }
-                    else if (cvdRatio >= 0.03m) { cvdLabel = "AGRESIÓN COMPRADORA"; cvdColor = ConsoleColor.Green; }
-                    else if (cvdRatio <= -0.08m) { cvdLabel = "VENTA EXTREMA (Pánico)"; cvdColor = ConsoleColor.Red; }
-                    else if (cvdRatio <= -0.03m) { cvdLabel = "AGRESIÓN VENDEDORA"; cvdColor = ConsoleColor.Red; }
-                    else if (cvdRatio > 0.001m) { cvdLabel = "FLUJO COMPRADOR LEVE"; cvdColor = ConsoleColor.DarkGreen; }
-                    else if (cvdRatio < -0.001m) { cvdLabel = "FLUJO VENDEDOR LEVE"; cvdColor = ConsoleColor.Red; }
-
-                    Console.ForegroundColor = cvdColor;
-                    Console.WriteLine($"{cvdRatio:+0.00%;-0.00%;0.00%} [{cvdLabel}]");
-                    Console.ResetColor();
                 }
-                Console.WriteLine();
 
-                // --- MVRV Z-SCORE (TERMÓMETRO DE CICLO) ---
-                if (sma365 > 0)
+                // Volume Z-Score (Institutional)
+                if (candles.Count >= 200)
                 {
-                    Console.Write("MVRV Z-Score:    ");
-                    string cycleLabel = "RECUPERACIÓN SALUDABLE";
-                    ConsoleColor cycleColor = ConsoleColor.White;
+                    Console.Write("Volume Z-Score:  ");
+                    string vzLabel = "VOLUMEN NORMAL";
+                    ConsoleColor vzColor = ConsoleColor.Green;
 
-                    if (mvrvZ < 0.1m) { cycleLabel = "SUELO / ACUMULACIÓN"; cycleColor = ConsoleColor.Green; }
-                    else if (mvrvZ > 7.0m) { cycleLabel = "BURBUJA / TECHO DE CICLO"; cycleColor = ConsoleColor.Red; }
-                    else if (mvrvZ >= 3.0m) { cycleLabel = "PRE-ALERTA (Euforia / Calentamiento)"; cycleColor = ConsoleColor.DarkYellow; }
+                    if (volumeZScore > 2.5m)
+                    {
+                        vzLabel = "INTERÉS INSTITUCIONAL AGRESIVO";
+                        vzColor = ConsoleColor.Red;
+                    }
+                    else if (volumeZScore > 1.5m)
+                    {
+                        vzLabel = "INTERÉS INSTITUCIONAL MODERADO";
+                        vzColor = ConsoleColor.DarkYellow;
+                    }
+                    else if (volumeZScore < -2.5m)
+                    {
+                        vzLabel = "AGOTAMIENTO EXTREMO";
+                        vzColor = ConsoleColor.Red;
+                    }
+                    else if (volumeZScore < -1.5m)
+                    {
+                        vzLabel = "DESINTERÉS / VOLUMEN BAJO";
+                        vzColor = ConsoleColor.DarkYellow;
+                    }
 
-                    Console.ForegroundColor = cycleColor;
-                    Console.WriteLine($"{mvrvZ:N2} [{cycleLabel}]");
+                    Console.ForegroundColor = vzColor;
+                    Console.WriteLine($"{volumeZScore:N2} [{vzLabel}]");
                     Console.ResetColor();
                 }
 
-                // --- ADX TREND STRENGTH ---
-                if (adx > 0)
-                {
-                    Console.Write("Fuerza Tendencia: ");
-                    string adxLabel = "NORMAL";
-                    ConsoleColor adxColor = ConsoleColor.White;
-
-                    if (adx < 20) { adxLabel = "MERCADO LATERAL / SIN TENDENCIA"; adxColor = ConsoleColor.DarkYellow; }
-                    else if (adx >= 25 && adx <= 40) { adxLabel = "TENDENCIA SALUDABLE"; adxColor = ConsoleColor.Green; }
-                    else if (adx > 40) { adxLabel = "TENDENCIA MUY FUERTE / AGOTAMIENTO"; adxColor = ConsoleColor.Red; }
-
-                    Console.ForegroundColor = adxColor;
-                    Console.WriteLine($"{adx:N1} [{adxLabel}]");
-                    Console.ResetColor();
-                }
-                Console.WriteLine();
-
-                // Color EMA Gap (Regla del Porcentaje)
-                Console.Write("EMA Trend 50/200: ");
-                if (ema200 > 0)
-                {
-                    if (currentPrice > ema50 && currentPrice > ema200)
-                    {
-                        Console.ForegroundColor = ConsoleColor.Green;
-                        Console.Write($"ALCISTA (${ema50:N0} / ${ema200:N0})");
-                    }
-                    else if (currentPrice < ema50 && currentPrice < ema200)
-                    {
-                        Console.ForegroundColor = ConsoleColor.Red;
-                        Console.Write($"BAJISTA (${ema50:N0} / ${ema200:N0})");
-                    }
-                    else
-                    {
-                        Console.ForegroundColor = ConsoleColor.DarkYellow;
-                        Console.Write($"NEUTRAL (Cruce o Rango)");
-                    }
-                    Console.ResetColor();
-
-                    // --- REGLA DEL PORCENTAJE (EMA GAP) ---
-                    if (ema200 > 0)
-                    {
-                        decimal emaGap = ((ema50 - ema200) / ema200) * 100;
-                        Console.Write("  [GAP EMA: ");
-                        
-                        // Determinar niveles según activo
-                        string status = "Desconocido";
-                        ConsoleColor gapColor = ConsoleColor.Gray;
-
-                        if (symbol.Contains("GSPC") || symbol.Contains("GC=F")) // S&P 500 o Oro (Lentos)
-                        {
-                            if (emaGap >= 12) { status = "PELIGRO"; gapColor = ConsoleColor.Red; }
-                            else if (emaGap >= 10) { status = "ALERTA"; gapColor = ConsoleColor.DarkYellow; }
-                            else { status = "SALUDABLE"; gapColor = ConsoleColor.Green; }
-                        }
-                        else // Crypto
-                        {
-                            if (emaGap >= 30) { status = "CLÍMAX/PELIGRO"; gapColor = ConsoleColor.Red; }
-                            else if (emaGap >= 25) { status = "SOBREEXTENDIDO"; gapColor = ConsoleColor.DarkYellow; }
-                            else { status = "SALUDABLE"; gapColor = ConsoleColor.Green; }
-                        }
-
-                        Console.ForegroundColor = gapColor;
-                        Console.Write($"{emaGap:+0.00;-0.00}% ({status})");
-                        Console.ResetColor();
-                        Console.WriteLine("]");
-                    }
-                    else { Console.WriteLine(); }
-
-                    // --- Z-SCORE (EXTREMOS ESTADÍSTICOS) ---
-                    if (closes.Count >= 200)
-                    {
-                        Console.Write("Z-Score (200d):  ");
-                        string zLabel = "NORMAL";
-                        ConsoleColor zColor = ConsoleColor.DarkYellow; // Naranja por defecto
-
-                        if (zScore >= 3.0m) { zLabel = "BURBUJA / CLÍMAX (Vender)"; zColor = ConsoleColor.Red; }
-                        else if (zScore <= -2.0m) { zLabel = "PÁNICO / OPORTUNIDAD (Comprar)"; zColor = ConsoleColor.Green; }
-                        else if (zScore > 2.0m) { zLabel = "SOBREEXTENDIDO"; }
-                        else if (zScore < 0) { zLabel = "BAJO EL PROMEDIO"; }
-                        else { zLabel = "SOBRE EL PROMEDIO"; }
-
-                        Console.ForegroundColor = zColor;
-                        Console.WriteLine($"{zScore:N2} [{zLabel}]");
-                        Console.ResetColor();
-                    }
-                }
-                else
-                {
-                    Console.WriteLine("Datos insuficientes para SMA 200");
-                }
-                Console.ResetColor();
-
-                // RSI Logic
-                Console.Write($"RSI (14):        ");
-                if (rsi > 70) 
-                {
-                    Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine($"{rsi:N2} [SOBRECOMPRA - RIESGO]");
-                }
-                else if (rsi < 30)
-                {
-                    Console.ForegroundColor = ConsoleColor.Green;
-                    Console.WriteLine($"{rsi:N2} [SOBREVENTA - OPORTUNIDAD]");
-                }
-                else
-                {
-                    Console.ForegroundColor = ConsoleColor.DarkYellow;
-                    Console.WriteLine($"{rsi:N2} [NEUTRAL]");
-                }
-                Console.ResetColor();
-
-                // Bollinger Logic
-                decimal bbWidthPercent = ((bbUpper - bbLower) / bbLower) * 100;
-                Console.Write("Bollinger:       ");
-                
-                if (currentPrice >= bbUpper)
-                {
-                    Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine("EN BANDA SUPERIOR (Resistencia/Venta)");
-                }
-                else if (currentPrice <= bbLower)
-                {
-                    Console.ForegroundColor = ConsoleColor.Green;
-                    Console.WriteLine("EN BANDA INFERIOR (Soporte/Compra)");
-                }
-                else
-                {
-                    Console.ForegroundColor = ConsoleColor.DarkYellow;
-                    Console.WriteLine("DENTRO DEL RANGO");
-                }
-                Console.ResetColor();
-
-                if (bbWidthPercent < 5.0m) 
-                {
-                    Console.Write(">> SQUEEZE:      ");
-                    Console.ForegroundColor = ConsoleColor.Cyan;
-                    Console.WriteLine("BANDAS ESTRECHAS (Atención: Movimiento Fuerte)");
-                    Console.ResetColor();
-                }
-
-                // MACD Logic
-                Console.Write("MACD Status:     ");
-                if (macdLine > signalLine)
-                {
-                    Console.ForegroundColor = ConsoleColor.Green;
-                    Console.Write("ALCISTA");
-                }
-                else
-                {
-                    Console.ForegroundColor = ConsoleColor.Red;
-                    Console.Write("BAJISTA");
-                }
-                Console.ResetColor();
-                
-                if (Math.Abs(macdLine - signalLine) < (currentPrice * 0.0005m)) // Cruce muy cercano
-                {
-                     Console.ForegroundColor = ConsoleColor.DarkYellow;
-                     Console.WriteLine(" (Posible Cruce en proceso)");
-                }
-                else
-                {
-                    Console.WriteLine();
-                }
-                Console.ResetColor();
-
-                // VWAP Logic
-                if (vwapDaily > 0)
-                {
-                    Console.Write($"VWAP (Intradía): ");
-                    if (currentPrice > vwapDaily)
-                    {
-                        Console.ForegroundColor = ConsoleColor.Green;
-                        Console.WriteLine($"${vwapDaily:N2} [BULLISH]");
-                    }
-                    else
-                    {
-                        Console.ForegroundColor = ConsoleColor.Red;
-                        Console.WriteLine($"${vwapDaily:N2} [BEARISH]");
-                    }
-                    Console.ResetColor();
-                }
-
-                // Inside Bar Detection
-                if (candles.Count >= 2)
-                {
-                    var yesterday = candles[candles.Count - 2];
-                    var today = candles[candles.Count - 1];
-
-                    bool isInsideBar = today.High < yesterday.High && today.Low > yesterday.Low;
-                    if (isInsideBar)
-                    {
-                        Console.Write("PATRÓN VELA:      ");
-                        Console.ForegroundColor = ConsoleColor.DarkYellow; // Orange/Neutral
-                        Console.WriteLine("INSIDE BAR (Consolidación / Pausa)");
-                        Console.ResetColor();
-                    }
-                }
-
-                Console.WriteLine();
-
-                // --- DERIVADOS (Solo Crypto) ---
                 if (isCrypto)
                 {
-                    Console.WriteLine("--- DERIVADOS (Binance Futures) ---");
-                    
-                    // Funding Rate
-                    try 
+                    decimal cvdRatio = CalculateCVDRatio(candles, 24);
+                    Console.Write("CVD Ratio Flow:  ");
+                    if (cvdRatio > 2.0m) { Console.ForegroundColor = ConsoleColor.Green; Console.WriteLine($"{cvdRatio:N2}% [COMPRA AGRESIVA]"); }
+                    else if (cvdRatio < -2.0m) { Console.ForegroundColor = ConsoleColor.Red; Console.WriteLine($"{cvdRatio:N2}% [VENTA AGRESIVA]"); }
+                    else { Console.WriteLine($"{cvdRatio:N2}% [FLUJO NEUTRAL]"); }
+                    Console.ResetColor();
+
+                    decimal prevCloseCvd = closes.Count >= 2 ? closes[closes.Count - 2] : currentPrice;
+                    bool priceUp = currentPrice > prevCloseCvd;
+                    if (!priceUp && cvdRatio > 1.0m) {
+                        Console.ForegroundColor = ConsoleColor.Cyan; Console.WriteLine(">> ALERTA:       POSIBLE ABSORCIÓN DE COMPRA (Bullish)"); Console.ResetColor();
+                    } else if (priceUp && cvdRatio < -1.0m) {
+                        Console.ForegroundColor = ConsoleColor.Magenta; Console.WriteLine(">> ALERTA:       DIVERGENCIA BAJISTA (Agotamiento)"); Console.ResetColor();
+                    }
+                }
+
+                // 4. Tendencia y Régimen de Mercado
+                Console.WriteLine("\n4. Tendencia y Régimen de Mercado");
+                Console.Write($"ADX (14): {adx14:N1} | ADX (28): {adx28:N1} ");
+                if (adx14 > 25 || adx28 > 25) {
+                    Console.ForegroundColor = ConsoleColor.Green; Console.Write("[TENDENCIA FUERTE]");
+                } else if (adx14 < 20 && adx28 < 20) {
+                    Console.ForegroundColor = ConsoleColor.Red; Console.Write("[SIN TENDENCIA (RANGO/RUIDO)]");
+                } else {
+                    Console.ForegroundColor = ConsoleColor.DarkYellow; Console.Write("[TRANSICIÓN DE RÉGIMEN]");
+                }
+                Console.ResetColor();
+
+                if (adx14 < 20 && adx28 < 20) {
+                    Console.ForegroundColor = ConsoleColor.Red; Console.Write(" >> SEÑALES BREAKOUT INVALIDADAS"); Console.ResetColor();
+                } else if ((adx14 > 25 || adx28 > 25) && ((currentPrice > ema50 && ema50 > ema200) || (currentPrice < ema50 && ema50 < ema200))) {
+                    Console.ForegroundColor = ConsoleColor.Cyan; Console.Write(" >> TENDENCIA CONFIRMADA"); Console.ResetColor();
+                }
+                Console.WriteLine();
+
+                Console.Write("Hurst Exponent:  ");
+                if (hurst > 0.55m) { Console.ForegroundColor = ConsoleColor.Green; Console.WriteLine($"{hurst:N2} [PERSISTENTE (Tendencial)]"); }
+                else if (hurst < 0.45m) { Console.ForegroundColor = ConsoleColor.Red; Console.WriteLine($"{hurst:N2} [REVERSIVO (Mean-reverting)]"); }
+                else { Console.ForegroundColor = ConsoleColor.DarkYellow; Console.WriteLine($"{hurst:N2} [ALEATORIO / TRANSICIÓN]"); }
+                Console.ResetColor();
+
+                // 5. Medias, Desviación y Posicionamiento
+                Console.WriteLine("\n5. Medias, Desviación y Posicionamiento");
+                Console.Write("EMA Trend 50/200: ");
+                decimal gapEma = ((ema50 - ema200) / ema200) * 100;
+                if (ema50 > ema200) {
+                    Console.ForegroundColor = ConsoleColor.Green; Console.Write("ALCISTA");
+                } else {
+                    Console.ForegroundColor = ConsoleColor.Red; Console.Write("BAJISTA");
+                }
+                Console.ResetColor();
+                Console.WriteLine($" (${ema50:N0} / ${ema200:N0})  [GAP EMA: {gapEma:N2}%" + (Math.Abs(gapEma) > 15 ? " (SOBREEXTENDIDO)]" : " (SALUDABLE)]"));
+
+                if (closes.Count >= 200) {
+                    Console.Write("Z-Score (200d):  ");
+                    string zLabel = "NORMAL"; ConsoleColor zColor = ConsoleColor.White;
+                    if (zScore > 2.0m) { zLabel = "SOBRECOMPRA"; zColor = ConsoleColor.Red; }
+                    else if (zScore < -2.0m) { zLabel = "SOBREVENTA"; zColor = ConsoleColor.Green; }
+                    Console.ForegroundColor = zColor; Console.WriteLine($"{zScore:N2} [{zLabel}]"); Console.ResetColor();
+
+                    if (returnZ30d != 0) {
+                        Console.Write("Z-Score Retorno 30D: ");
+                        string rzLabel = "NORMAL"; ConsoleColor rzColor = ConsoleColor.DarkYellow;
+                        if (returnZ30d < -2.0m) { rzLabel = "ANOMALÍA BAJISTA (Rebote Probable)"; rzColor = ConsoleColor.Green; }
+                        else if (returnZ30d > 2.0m) { rzLabel = "SOBREEXTENSIÓN (Riesgo Corrección)"; rzColor = ConsoleColor.Red; }
+                        Console.ForegroundColor = rzColor; Console.Write($"{returnZ30d:N2} [{rzLabel}]"); Console.ResetColor();
+
+                        if (returnZ30d < -2.0m && mvrvZ < 0.1m && rsi < 35) {
+                            Console.ForegroundColor = ConsoleColor.Green; Console.Write(" >> ¡CAPITULACIÓN EXTREMA DETECTADA!"); Console.ResetColor();
+                        } else if (returnZ30d > 2.0m && mvrvZ > 3.0m && rsi > 65) {
+                            Console.ForegroundColor = ConsoleColor.Red; Console.Write(" >> ¡EUFORIA EXTREMA / RIESGO DE TECHO!"); Console.ResetColor();
+                        }
+                        Console.WriteLine();
+                    }
+                }
+
+                // 6. Indicadores Técnicos de Momentum
+                Console.WriteLine("\n6. Indicadores Técnicos de Momentum");
+                Console.Write($"RSI (14):        {rsi:N2} ");
+                if (rsi >= 70) { Console.ForegroundColor = ConsoleColor.Red; Console.WriteLine("[SOBRECOMPRA]"); }
+                else if (rsi <= 30) { Console.ForegroundColor = ConsoleColor.Green; Console.WriteLine("[SOBREVENTA]"); }
+                else { Console.WriteLine("[NEUTRAL]"); }
+                Console.ResetColor();
+
+                Console.Write("Bollinger:       ");
+                if (currentPrice > bbUpper) { Console.ForegroundColor = ConsoleColor.Red; Console.WriteLine("FUERA (Superior)"); }
+                else if (currentPrice < bbLower) { Console.ForegroundColor = ConsoleColor.Green; Console.WriteLine("FUERA (Inferior)"); }
+                else { Console.WriteLine("DENTRO DEL RANGO"); }
+                Console.ResetColor();
+
+                decimal bbWidthPercent = ((bbUpper - bbLower) / bbSma) * 100;
+                if (bbWidthPercent < 5.0m) {
+                    Console.Write(">> SQUEEZE:      ");
+                    Console.ForegroundColor = ConsoleColor.Cyan; Console.Write("BANDAS ESTRECHAS (Atención: Movimiento Fuerte)");
+                    if (hurst > 0.55m) { Console.ForegroundColor = ConsoleColor.Green; Console.Write(" + HURST PERSISTENTE: ALTA PROBABILIDAD DE CONTINUACIÓN"); }
+                    else if (hurst < 0.45m) { Console.ForegroundColor = ConsoleColor.Red; Console.Write(" + HURST REVERSIVO: POSIBLE FALSO BREAKOUT / REVERSIÓN"); }
+                    if (atrPercentile < 20) { Console.ForegroundColor = ConsoleColor.Magenta; Console.Write(" [EXPANSIÓN INMINENTE]"); }
+                    Console.WriteLine(); Console.ResetColor();
+                }
+
+                Console.Write("MACD Status:     ");
+                if (macdLine > signalLine) { Console.ForegroundColor = ConsoleColor.Green; Console.Write("ALCISTA"); }
+                else { Console.ForegroundColor = ConsoleColor.Red; Console.Write("BAJISTA"); }
+                Console.ResetColor();
+                if (Math.Abs(macdLine - signalLine) < (currentPrice * 0.0005m)) Console.WriteLine(" (Posible Cruce en proceso)"); else Console.WriteLine();
+
+                if (vwapDaily > 0) {
+                    Console.Write($"VWAP (Intradía): ");
+                    if (currentPrice > vwapDaily) { Console.ForegroundColor = ConsoleColor.Green; Console.WriteLine($"${vwapDaily:N2} [BULLISH]"); }
+                    else { Console.ForegroundColor = ConsoleColor.Red; Console.WriteLine($"${vwapDaily:N2} [BEARISH]"); }
+                    Console.ResetColor();
+                }
+
+                if (candles.Count >= 2) {
+                    var yesterday = candles[candles.Count - 2];
+                    var today = candles[candles.Count - 1];
+                    if (today.High < yesterday.High && today.Low > yesterday.Low) {
+                        Console.Write("PATRÓN VELA:      "); Console.ForegroundColor = ConsoleColor.DarkYellow;
+                        Console.Write("INSIDE BAR (Consolidación / Pausa)");
+                        if (atrPercentile < 20) { Console.ForegroundColor = ConsoleColor.Magenta; Console.Write(" >> EXPANSIÓN INMINENTE"); }
+                        Console.WriteLine(); Console.ResetColor();
+                    }
+                }
+
+                // 7. Métricas On-chain / Valuación (Solo Crypto si disponible)
+                if (isCrypto && mvrvZ != 0) {
+                    Console.WriteLine("\n7. Métricas On-chain / Valuación");
+                    Console.Write("MVRV Z-Score:    ");
+                    if (mvrvZ > 3.0m) { Console.ForegroundColor = ConsoleColor.Red; Console.WriteLine($"{mvrvZ:N2} [SOBREVALUADO / RIESGO]"); }
+                    else if (mvrvZ < 0.1m) { Console.ForegroundColor = ConsoleColor.Green; Console.WriteLine($"{mvrvZ:N2} [SUELO / ACUMULACIÓN]"); }
+                    else { Console.WriteLine($"{mvrvZ:N2} [ZONA NEUTRAL]"); }
+                    Console.ResetColor();
+
+                    if (symbol == "BTCUSDT" && miningCost30d > 0)
                     {
-                        decimal fundingRate = await FetchFundingRate(symbol);
-                        Console.Write($"Funding Rate:    {fundingRate:P4} ");
+                        Console.WriteLine($"Bitcoin Mining Cost (30D): ${miningCost30d:N0}");
+                        Console.WriteLine($"Bitcoin Mining Cost (90D): ${miningCost90d:N0}");
+                        Console.Write("BTC / Mining Cost Ratio: ");
+                        string mStatus = "EQUILIBRIO"; ConsoleColor mColor = ConsoleColor.DarkYellow;
+                        if (miningRatio < 1.0m) { mStatus = "INFRAVALORACIÓN EXTREMA"; mColor = ConsoleColor.Green; }
+                        else if (miningRatio > 1.3m) { mStatus = "SOBREVALORACIÓN RELATIVA"; mColor = ConsoleColor.Red; }
+                        else { mStatus = "ZONA DE ACUMULACIÓN / EQUILIBRIO"; mColor = ConsoleColor.DarkYellow; }
                         
-                        if (fundingRate > 0.01m)
-                        {
-                            Console.ForegroundColor = ConsoleColor.Red;
-                            Console.WriteLine("(Muy Alto - Longs pagan a Shorts - Riesgo de Squeeze)");
-                        }
-                        else if (fundingRate > 0)
-                        {
-                            Console.ForegroundColor = ConsoleColor.Green;
-                            Console.WriteLine("(Positivo - Sentimiento Alcista)");
-                        }
-                        else
-                        {
-                            Console.ForegroundColor = ConsoleColor.Red;
-                            Console.WriteLine("(Negativo - Shorts pagan a Longs - Sentimiento Bajista)");
-                        }
+                        Console.ForegroundColor = mColor;
+                        Console.WriteLine($"{miningRatio:N2} [{mStatus}]");
+                        Console.ResetColor();
+
+                        Console.Write("Miners Stress Index:     ");
+                        string sStatus = "NORMAL"; ConsoleColor sColor = ConsoleColor.White;
+                        if (minersStress > 1.0m) { sStatus = "ESTRÉS EXTREMO / SUELO POTENCIAL"; sColor = ConsoleColor.Green; }
+                        else if (minersStress >= 0.8m) { sStatus = "ESTRÉS MODERADO"; sColor = ConsoleColor.DarkYellow; }
+                        else { sStatus = "MINEROS CÓMODOS / POSIBLE DISTRIBUCIÓN"; sColor = ConsoleColor.Red; }
+                        
+                        Console.ForegroundColor = sColor;
+                        Console.WriteLine($"{minersStress:N2} [{sStatus}]");
                         Console.ResetColor();
                     }
-                    catch { Console.WriteLine("Funding Rate:    No disponible"); }
+                }
 
-                    // Open Interest
-                    try
-                    {
+                // 8. Derivados (Solo Crypto)
+                if (isCrypto)
+                {
+                    Console.WriteLine("\n8. Derivados (Binance Futures)");
+                    try {
+                        decimal fundingRate = await FetchFundingRate(symbol);
+                        Console.Write($"Funding Rate:    {fundingRate:P4} ");
+                        if (fundingRate > 0.01m) { Console.ForegroundColor = ConsoleColor.Red; Console.WriteLine("(Muy Alto - Riesgo de Long Squeeze)"); }
+                        else if (fundingRate > 0) { Console.ForegroundColor = ConsoleColor.Green; Console.WriteLine("(Positivo - Sentiment Alcista)"); }
+                        else { Console.ForegroundColor = ConsoleColor.Red; Console.WriteLine("(Negativo - Sentiment Bajista)"); }
+                        Console.ResetColor();
+                    } catch { }
+
+                    try {
                         var oiHistory = await FetchOpenInterestHist(symbol, "1h", 2);
-                        if (oiHistory.Count >= 2)
-                        {
-                            var prevOI = oiHistory[0];
-                            var currOI = oiHistory[1];
+                        if (oiHistory.Count >= 2) {
+                            var prevOI = oiHistory[0]; var currOI = oiHistory[1];
                             decimal oiChange = currOI.SumOpenInterestValue - prevOI.SumOpenInterestValue;
-                            
                             Console.Write($"Open Interest:   ${currOI.SumOpenInterestValue:N0} ");
-                            if (oiChange > 0)
-                            {
-                                Console.ForegroundColor = ConsoleColor.Green;
-                                Console.WriteLine($"(SUBIENDO +${oiChange:N0} en 1h)");
+                            if (oiChange > 0) {
+                                Console.ForegroundColor = ConsoleColor.Green; Console.WriteLine($"(SUBIENDO +${oiChange:N0} en 1h)");
                                 if (currentPrice > sma50) Console.WriteLine(">> COMENTARIO:   OI Subiendo + Precio Alcista = TENDENCIA SANA");
-                            }
-                            else
-                            {
-                                Console.ForegroundColor = ConsoleColor.Red;
-                                Console.WriteLine($"(BAJANDO ${oiChange:N0} en 1h)");
+                            } else {
+                                Console.ForegroundColor = ConsoleColor.Red; Console.WriteLine($"(BAJANDO ${oiChange:N0} en 1h)");
                                 Console.WriteLine(">> COMENTARIO:   OI Bajando = Liquidaciones o Salida de Capital");
                             }
                             Console.ResetColor();
                         }
-                    }
-                    catch { Console.WriteLine("Open Interest:   No disponible"); }
-
-                    Console.WriteLine();
+                    } catch { }
                 }
+                Console.WriteLine();
         }
 
         static async Task FetchFearAndGreed()
@@ -752,63 +709,115 @@ namespace CryptoNewsletter
         {
             try
             {
-                // API DeFiLlama
-                string url = "https://stablecoins.llama.fi/stablecoincharts/all";
-                string json = await client.GetStringAsync(url);
-                using JsonDocument doc = JsonDocument.Parse(json);
-                var items = doc.RootElement.EnumerateArray().ToList();
-                
-                if (items.Count == 0) 
+                // 1. Fetch Stablecoin history (DeFiLlama)
+                string stableUrl = "https://stablecoins.llama.fi/stablecoincharts/all";
+                string stableJson = await client.GetStringAsync(stableUrl);
+                using JsonDocument stableDoc = JsonDocument.Parse(stableJson);
+                var stableItems = stableDoc.RootElement.EnumerateArray().ToList();
+
+                // 2. Fetch BTC Market Cap history (Blockchain.info)
+                string btcUrl = "https://api.blockchain.info/charts/market-cap?timespan=1year&format=json";
+                string btcJson = await client.GetStringAsync(btcUrl);
+                var btcData = JsonSerializer.Deserialize<BlockchainChart>(btcJson);
+
+                if (stableItems.Count == 0 || btcData?.values == null || btcData.values.Count == 0)
                 {
-                    Console.WriteLine("Proxy Liquidez (Stables): No disponible");
+                    Console.WriteLine("Proxy Liquidez (SSR): No disponible (Datos incompletos)");
                     return;
                 }
 
-                var last = items.Last();
-                decimal currentTotal = last.GetProperty("totalCirculating").GetProperty("peggedUSD").GetDecimal();
-                decimal billions = currentTotal / 1_000_000_000m;
+                // 3. Align data and calculate SSR
+                // SSR = BTC_MarketCap / Total_Stablecoin_MarketCap
+                var ssrHistory = new List<decimal>();
+                
+                // We group by date to avoid duplicate keys in case the API provides multiple points per day
+                var btcDict = btcData.values
+                    .GroupBy(v => DateTimeOffset.FromUnixTimeSeconds(v.x).Date)
+                    .ToDictionary(
+                        g => g.Key, 
+                        g => (decimal)g.Last().y
+                    );
 
-                Console.Write($"Proxy Liquidez (Stables): ${billions:N2}B ");
-
-                if (items.Count >= 91)
+                foreach (var item in stableItems)
                 {
-                    decimal currentTotalRel = currentTotal;
-                    decimal val7d = items[items.Count - 8].GetProperty("totalCirculating").GetProperty("peggedUSD").GetDecimal();
-                    decimal val30d = items[items.Count - 31].GetProperty("totalCirculating").GetProperty("peggedUSD").GetDecimal();
-                    decimal val90d = items[items.Count - 91].GetProperty("totalCirculating").GetProperty("peggedUSD").GetDecimal();
+                    long unixTime = long.Parse(item.GetProperty("date").GetString());
+                    DateTime date = DateTimeOffset.FromUnixTimeSeconds(unixTime).Date;
+                    decimal stableMcap = item.GetProperty("totalCirculating").GetProperty("peggedUSD").GetDecimal();
 
-                    decimal change7d = (currentTotalRel - val7d) / val7d;
-                    decimal change30d = (currentTotalRel - val30d) / val30d;
-                    decimal change90d = (currentTotalRel - val90d) / val90d;
+                    if (btcDict.TryGetValue(date, out decimal btcMcap) && stableMcap > 0)
+                    {
+                        ssrHistory.Add(btcMcap / stableMcap);
+                    }
+                }
 
-                    Console.Write("(");
-                    PrintTrend("7d", change7d);
-                    Console.Write(" | ");
-                    PrintTrend("30d", change30d);
-                    Console.Write(" | ");
-                    PrintTrend("90d", change90d);
-                    Console.Write(") ");
+                // --- CALCULAR Z-SCORE (200D) ---
+                if (ssrHistory.Count >= 200)
+                {
+                    decimal latestSSR = ssrHistory.Last();
+                    decimal sma200 = CalculateSMA(ssrHistory, 200);
+                    decimal std200 = CalculateStdDev(ssrHistory, 200);
+                    decimal ssrZ = (std200 > 0) ? (latestSSR - sma200) / std200 : 0;
 
-                    // --- LIQUIDITY ROC 30d (Global Proxy) ---
-                    Console.Write("ROC 30d: ");
-                    string rocLabel = "ESTANCAMIENTO";
-                    ConsoleColor rocColor = ConsoleColor.DarkYellow;
+                    // Display Stablecoin Liquidity (Original)
+                    decimal currentStableTotal = stableItems.Last().GetProperty("totalCirculating").GetProperty("peggedUSD").GetDecimal();
+                    decimal billions = currentStableTotal / 1_000_000_000m;
+                    Console.Write($"Proxy Liquidez (Stables): ${billions:N2}B ");
 
-                    if (change30d < 0) { rocLabel = "CONTRACCIÓN"; rocColor = ConsoleColor.Red; }
-                    else if (change30d >= 0.05m) { rocLabel = "SHOCK DE LIQUIDEZ"; rocColor = ConsoleColor.Magenta; }
-                    else if (change30d >= 0.03m) { rocLabel = "IMPULSO FUERTE"; rocColor = ConsoleColor.Cyan; }
-                    else if (change30d >= 0.01m) { rocLabel = "CRECIMIENTO SANO"; rocColor = ConsoleColor.Green; }
+                    // Calculate 30d change for Liquidity (Original logic)
+                    if (stableItems.Count >= 31)
+                    {
+                        decimal val30d = stableItems[stableItems.Count - 31].GetProperty("totalCirculating").GetProperty("peggedUSD").GetDecimal();
+                        decimal change30d = (currentStableTotal - val30d) / val30d;
+                        Console.Write($"({change30d:+0.00%;-0.00%} 30d) ");
+                    }
+                    Console.WriteLine();
 
-                    Console.ForegroundColor = rocColor;
-                    Console.WriteLine($"{change30d:+0.00%;-0.00%} [{rocLabel}]");
-                    Console.ResetColor();
+                    // Display SSR Z-Score (New)
+                    Console.Write("SSR Z-Score (200d):      ");
+                    PrintSSRZ(ssrZ);
                 }
                 else
                 {
-                    Console.WriteLine();
+                    Console.WriteLine("Proxy Liquidez (SSR): Datos históricos insuficientes para Z-Score");
                 }
             }
-            catch { Console.WriteLine("Proxy Liquidez (Stables): Error"); }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Proxy Liquidez (SSR): Error ({ex.Message})");
+            }
+        }
+
+        static void PrintSSRZ(decimal ssrZ)
+        {
+            Console.Write($"{ssrZ:N2} ");
+            
+            string interpretation;
+            ConsoleColor color;
+
+            if (ssrZ < -2.0m)
+            {
+                interpretation = "[PODER DE COMPRA EXTREMO - Suelo Macro]";
+                color = ConsoleColor.Green;
+            }
+            else if (ssrZ > 2.0m)
+            {
+                interpretation = "[RIESGO ELEVADO - Sobreextensión]";
+                color = ConsoleColor.Red;
+            }
+            else if (ssrZ >= -1.0m && ssrZ <= 1.0m)
+            {
+                interpretation = "[MERCADO BALANCEADO]";
+                color = ConsoleColor.White;
+            }
+            else
+            {
+                interpretation = "[ZONA DE TRANSICIÓN]";
+                color = ConsoleColor.DarkYellow;
+            }
+
+            Console.ForegroundColor = color;
+            Console.WriteLine(interpretation);
+            Console.ResetColor();
         }
 
         static void PrintTrend(string label, decimal change)
@@ -818,6 +827,35 @@ namespace CryptoNewsletter
             else Console.ForegroundColor = ConsoleColor.Red;
             Console.Write($"{change:+0.00%;-0.00%}");
             Console.ResetColor();
+        }
+
+        static async Task<List<decimal>> FetchMiningCostHistory()
+        {
+            try
+            {
+                string url = "https://api.blockchain.info/charts/hash-rate?timespan=1year&format=json";
+                string json = await client.GetStringAsync(url);
+                var data = JsonSerializer.Deserialize<BlockchainChart>(json);
+                
+                var costHistory = new List<decimal>();
+                if (data == null || data.values == null) return costHistory;
+
+                // Constants
+                decimal efficiency = 23m; // J/TH
+                decimal energyPrice = 0.07m; // $/kWh
+                decimal dailyBTCIssuance = 450m; // Post-halving approx
+
+                foreach (var val in data.values)
+                {
+                    decimal hashrateTHs = (decimal)val.y; // In TH/s
+                    // DailyCost = (Hashrate * Efficiency * 24 / 1000) * Price
+                    decimal dailyCostUSD = (hashrateTHs * efficiency * 24m / 1000m) * energyPrice;
+                    decimal costPerBTC = dailyCostUSD / dailyBTCIssuance;
+                    costHistory.Add(costPerBTC);
+                }
+                return costHistory;
+            }
+            catch { return new List<decimal>(); }
         }
 
         static async Task FetchRealRate()
@@ -844,6 +882,38 @@ namespace CryptoNewsletter
                 }
             }
             catch { Console.WriteLine("Tasa Real Estimada:  No disponible"); }
+        }
+
+        static async Task FetchUSDTPremium()
+        {
+            try
+            {
+                // Fetch USDT/USD from Coinbase (Highly specific and reliable)
+                string url = "https://api.coinbase.com/v2/prices/USDT-USD/spot";
+                string json = await client.GetStringAsync(url);
+                using JsonDocument doc = JsonDocument.Parse(json);
+                
+                // Response: {"data":{"base":"USDT","currency":"USD","amount":"1.0001"}}
+                var data = doc.RootElement.GetProperty("data");
+                string amountStr = data.GetProperty("amount").GetString();
+                decimal usdtPrice = decimal.Parse(amountStr, CultureInfo.InvariantCulture);
+                
+                if (usdtPrice < 0.50m || usdtPrice > 2.0m)
+                {
+                    Console.WriteLine("USDT Premium Index:  Fuera de rango (Error de Datos)");
+                    return;
+                }
+
+                // Formula: ((Precio USDT / USD) - 1) * 100
+                decimal premium = (usdtPrice - 1.00m) * 100;
+                
+                Console.Write("USDT Premium Index:  ");
+                PrintUSDTPremium(premium);
+            }
+            catch 
+            { 
+                Console.WriteLine("USDT Premium Index:  No disponible (API Error)"); 
+            }
         }
 
         static async Task FetchMacroIndicator(string symbol, string label, string unit)
@@ -905,6 +975,47 @@ namespace CryptoNewsletter
             else Console.ForegroundColor = isPositiveGood ? ConsoleColor.Red : ConsoleColor.Green;
 
             Console.Write($"{change:+0.00%;-0.00%}");
+            Console.ResetColor();
+        }
+
+        static void PrintUSDTPremium(decimal premium)
+        {
+            // The percentage is already multiplied by 100 in the calculation.
+            // Using '%' in the format string would multiply it by 100 AGAIN.
+            // We use a literal '%' instead.
+            Console.Write($"{premium:+0.000;-0.000}% ");
+            
+            string interpretation;
+            ConsoleColor color;
+            
+            // INSTITUTIONAL INTERPRETATION (User Defined)
+            // > +0.10% -> Urgent liquidity demand
+            // 0.00% - 0.05% -> Neutral / Wait
+            // Negative -> Capital outflow / De-risking
+
+            if (premium > 0.10m)
+            {
+                interpretation = "→ Demanda urgente de liquidez (Entrada Institucional)";
+                color = ConsoleColor.Green; // Green for bullish signal implication
+            }
+            else if (premium > 0.05m)
+            {
+                interpretation = " Demanda moderada (Atención)";
+                color = ConsoleColor.DarkYellow;
+            }
+            else if (premium >= 0.00m) // 0.00 to 0.05
+            {
+                interpretation = " Mercado neutral / espera";
+                color = ConsoleColor.White;
+            }
+            else // Negative
+            {
+                interpretation = " Salida de capital / desriesgo";
+                color = ConsoleColor.Red; // Red for bearish/outflow
+            }
+            
+            Console.ForegroundColor = color;
+            Console.WriteLine(interpretation);
             Console.ResetColor();
         }
 
@@ -1077,6 +1188,135 @@ namespace CryptoNewsletter
             return adx;
         }
 
+        static List<decimal> CalculateATRSeries(List<Candle> candles, int period)
+        {
+            var trValues = new List<decimal>();
+            for (int i = 1; i < candles.Count; i++)
+            {
+                decimal hl = candles[i].High - candles[i].Low;
+                decimal hcp = Math.Abs(candles[i].High - candles[i - 1].Close);
+                decimal lcp = Math.Abs(candles[i].Low - candles[i - 1].Close);
+                trValues.Add(Math.Max(hl, Math.Max(hcp, lcp)));
+            }
+
+            var atrSeries = new List<decimal>(new decimal[candles.Count]);
+            if (trValues.Count < period) return atrSeries;
+
+            decimal atr = trValues.Take(period).Average();
+            atrSeries[period] = atr;
+
+            for (int i = period; i < trValues.Count; i++)
+            {
+                atr = ((atr * (period - 1)) + trValues[i]) / period;
+                if (i + 1 < atrSeries.Count)
+                    atrSeries[i + 1] = atr;
+            }
+
+            return atrSeries;
+        }
+
+        static decimal CalculatePercentile(decimal value, List<decimal> history)
+        {
+            if (history.Count == 0) return 0;
+            int count = history.Count(v => v < value);
+            return (decimal)count / history.Count * 100;
+        }
+
+        static decimal CalculateReturnZScore(List<decimal> prices, int returnPeriod = 30)
+        {
+            if (prices.Count < returnPeriod + 2) return 0;
+
+            var returns30d = new List<decimal>();
+            for (int i = returnPeriod; i < prices.Count; i++)
+            {
+                if (prices[i - returnPeriod] > 0)
+                {
+                    decimal ret = (prices[i] - prices[i - returnPeriod]) / prices[i - returnPeriod];
+                    returns30d.Add(ret);
+                }
+            }
+
+            if (returns30d.Count < 20) return 0;
+
+            decimal currentReturn = returns30d.Last();
+            decimal mean = returns30d.Average();
+            decimal stdDev = (decimal)Math.Sqrt(returns30d.Select(r => Math.Pow((double)(r - mean), 2)).Average());
+
+            return stdDev > 0 ? (currentReturn - mean) / stdDev : 0;
+        }
+
+        static decimal CalculateHurstExponent(List<Candle> candles, int window = 200)
+        {
+            if (candles.Count < window) return 0;
+
+            var subset = candles.Skip(candles.Count - window).ToList();
+            var logReturns = new List<double>();
+            for (int i = 1; i < subset.Count; i++)
+            {
+                if (subset[i - 1].Close > 0 && subset[i].Close > 0)
+                    logReturns.Add(Math.Log((double)(subset[i].Close / subset[i - 1].Close)));
+            }
+
+            if (logReturns.Count < 10) return 0;
+
+            // Simple R/S calculation for multiple lags
+            var lags = new int[] { 10, 20, 40, 80, 100, logReturns.Count };
+            var rsValues = new List<double>();
+            var actualLags = new List<double>();
+
+            foreach (var n in lags)
+            {
+                if (n > logReturns.Count) continue;
+
+                // For each lag n, we calculate average R/S
+                var rsResults = new List<double>();
+                int numSegments = logReturns.Count / n;
+                
+                for (int s = 0; s < numSegments; s++)
+                {
+                    var segment = logReturns.Skip(s * n).Take(n).ToList();
+                    double mean = segment.Average();
+                    
+                    var deviations = new List<double>();
+                    double cumulative = 0;
+                    foreach (var val in segment)
+                    {
+                        cumulative += (val - mean);
+                        deviations.Add(cumulative);
+                    }
+
+                    double range = deviations.Max() - deviations.Min();
+                    double stdDev = Math.Sqrt(segment.Select(v => Math.Pow(v - mean, 2)).Average());
+
+                    if (stdDev > 0)
+                        rsResults.Add(range / stdDev);
+                }
+
+                if (rsResults.Count > 0)
+                {
+                    rsValues.Add(Math.Log(rsResults.Average()));
+                    actualLags.Add(Math.Log(n));
+                }
+            }
+
+            if (actualLags.Count < 2) return 0;
+
+            // Linear regression to find the slope (Hurst Exponent)
+            double avgX = actualLags.Average();
+            double avgY = rsValues.Average();
+
+            double numerator = 0;
+            double denominator = 0;
+
+            for (int i = 0; i < actualLags.Count; i++)
+            {
+                numerator += (actualLags[i] - avgX) * (rsValues[i] - avgY);
+                denominator += Math.Pow(actualLags[i] - avgX, 2);
+            }
+
+            return denominator != 0 ? (decimal)(numerator / denominator) : 0.5m;
+        }
+
         static (decimal Macd, decimal Signal, decimal Hist) CalculateMACD(List<decimal> prices)
         {
             // EMA 12, EMA 26 calculation
@@ -1117,6 +1357,52 @@ namespace CryptoNewsletter
             // Fill previous 0s with approximations or leave 0. 
             // Para indices < period-1 se queda en 0.
             return emas;
+        }
+        static decimal CalculateCVDRatio(List<Candle> candles, int period)
+        {
+            if (candles.Count < period) return 0;
+            var subset = candles.Skip(candles.Count - period).ToList();
+            decimal totalBuy = subset.Sum(c => c.TakerBuyVolume);
+            decimal totalVol = subset.Sum(c => c.Volume);
+            if (totalVol == 0) return 0;
+            return ((totalBuy / totalVol) - 0.5m) * 100;
+        }
+    }
+
+    // Helper class to write to multiple TextWriters simultaneously
+    public class MultiTextWriter : TextWriter
+    {
+        private readonly TextWriter[] writers;
+
+        public MultiTextWriter(params TextWriter[] writers)
+        {
+            this.writers = writers;
+        }
+
+        public override Encoding Encoding => Encoding.UTF8;
+
+        public override void Write(char value)
+        {
+            foreach (var writer in writers)
+                writer.Write(value);
+        }
+
+        public override void Write(string value)
+        {
+            foreach (var writer in writers)
+                writer.Write(value);
+        }
+
+        public override void WriteLine(string value)
+        {
+            foreach (var writer in writers)
+                writer.WriteLine(value);
+        }
+
+        public override void Flush()
+        {
+            foreach (var writer in writers)
+                writer.Flush();
         }
     }
 }
