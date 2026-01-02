@@ -1,8 +1,8 @@
-# 🚀 Crypto & Macro Intelligence v9.8 (Precision)
+# 🚀 Crypto & Macro Intelligence v9.9 (Precision)
 
 **Análisis avanzado de mercados financieros (Cripto y Macro) directamente en tu consola.**
 
-Este proyecto es una herramienta robusta en C# diseñada para traders e inversores que buscan una visión unificada del mercado. Combina datos de **Binance** (Order Flow real) con datos de **Yahoo Finance** (S&P 500, Oro, DXY) para detectar oportunidades de agresión institucional y divergencias de precio.
+Este proyecto es una herramienta robusta en C# diseñada para traders e inversores que buscan una visión unificada del mercado. Combina datos de **Binance** (Order Flow real) con datos de **Yahoo Finance**, **Coinbase** y **Blockchain.info** para detectar oportunidades de agresión institucional y divergencias de precio.
 
 ---
 
@@ -11,15 +11,16 @@ Este proyecto es una herramienta robusta en C# diseñada para traders e inversor
 ### 📊 Análisis de Flujo de Órdenes (Order Flow)
 - **CVD Ratio Flow**: Mide la agresión de compradores vs vendedores a mercado (Taker Volume).
 - **Detección de Divergencias Pro**: Identifica absorciones alcistas y agotamientos bajistas comparando la acción del precio con el delta de volumen.
-- **Damping Macro**: Algoritmo de suavizado para que los activos tradicionales sean comparables con la volatilidad de Bitcoin.
+- **Volume Z-Score**: Normalización de volumen histórico (200d) para detectar picos de interés institucional.
 
 ### 🌡️ Termómetros de Ciclo y Tendencia
+- **SSR Z-Score (200d)**: Ratio de Suministro de Stablecoins normalizado. Identifica suelos macro cuando el poder de compra de las stables es históricamente alto.
 - **MVRV Z-Score Proxy**: Utiliza SMA de 365 días y Desviación Estándar para identificar techos y suelos de ciclo.
-- **Sincronización EMA Trend**: Análisis de tendencia pura usando EMAs de 50 y 200 periodos, alineadas con el cálculo de GAP de momentum.
-- **ADX Trend Strength**: Medidor de la fuerza de la tendencia para diferenciar mercados laterales de impulsos sanos.
+- **USDT Premium Index**: Medidor de demanda de fiat rails (vía Coinbase) para anticipar entradas de capital institucional.
+- **Sincronización EMA Trend**: Análisis de tendencia pura usando EMAs de 50 y 200 periodos.
 
 ### 🌍 Contexto Macroeconómico
-- **Liquidez Global ROC**: Rastreo de la tasa de cambio (30d) del Market Cap de Stablecoins.
+- **Liquidez Global ROC**: Rastreo de la tasa de cambio (30d) del Market Cap de Stablecoins (vía DeFiLlama).
 - **Real Rates Estimados**: Cálculo de tasas reales (TNX - T10YIE) para anticipar movimientos en activos de riesgo.
 - **Correlaciones Macro**: DXY, Yields de Bonos y Tasas de la FED integradas.
 
@@ -27,7 +28,7 @@ Este proyecto es una herramienta robusta en C# diseñada para traders e inversor
 
 ## 🛠️ Stack Tecnológico
 - **Lenguaje**: C# (.NET 6.0+)
-- **APIs**: Binance API, Yahoo Finance API, DeFiLlama, Alternative.me.
+- **APIs**: Binance, Yahoo Finance, Coinbase (Fiat Rails), DeFiLlama (Stablecoins), Blockchain.info (BTC Market Cap), Alternative.me.
 - **Librerías**: `System.Text.Json`, `HttpClient`.
 
 ---
